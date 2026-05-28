@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tmux-agent-comms"
+version = "0.1.0"
+description = "A discreet, zero-dependency message bus that lets terminal AI agents (Claude Code, Codex, Grok, Aider...) talk to each other over tmux — via readable markdown threads + a doorbell."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+authors = [{ name = "Paul Strange" }]
+keywords = [
+    "tmux", "ai-agents", "claude-code", "codex", "aider",
+    "multi-agent", "cli", "orchestration", "agent-communication",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Utilities",
+    "Topic :: Software Development",
+]
+dependencies = []  # stdlib only — by design
+
+[project.urls]
+Homepage = "https://github.com/law-strange/tmux-agent-comms"
+Repository = "https://github.com/law-strange/tmux-agent-comms"
+Issues = "https://github.com/law-strange/tmux-agent-comms/issues"
+
+[project.scripts]
+agent_comms = "agent_comms:main"
+agent-comms = "agent_comms:main"
+
+[tool.hatch.build.targets.wheel]
+# single-module project
+only-include = ["agent_comms.py"]
+
+[tool.hatch.build.targets.sdist]
+include = ["agent_comms.py", "registry.example.json", "README.md", "LICENSE", "install.sh", "tests/"]

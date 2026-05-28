@@ -1,0 +1,32 @@
+{
+  "agents": {
+    "claude": {
+      "session": "claude",
+      "color": "red",
+      "enabled": true,
+      "desc": "Claude Code",
+      "revive_cmd": null
+    },
+    "codex": {
+      "session": "codex",
+      "color": "blue",
+      "enabled": true,
+      "desc": "Codex CLI",
+      "revive_cmd": null
+    },
+    "grok": {
+      "session": "grok",
+      "color": "magenta",
+      "enabled": true,
+      "desc": "Grok CLI",
+      "revive_cmd": "tmux new-session -d -s grok 'grok'"
+    },
+    "aider": {
+      "session": "aider",
+      "color": "green",
+      "enabled": false,
+      "desc": "Aider pair-programmer (example, disabled)",
+      "revive_cmd": null
+    }
+  }
+}

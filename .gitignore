@@ -1,0 +1,26 @@
+# Keep your live registry + comms log + threads private — they reveal your
+# session layout and conversation content
+registry.json
+comms.log
+threads/
+projects/
+coms_join.md
+*.tmp
+*.md.lock
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Agent session/tooling artifacts — never publish (may contain private session data)
+.letta/
+.claude/
+
+# macOS / exFAT AppleDouble + Finder cruft
+._*
+.DS_Store
