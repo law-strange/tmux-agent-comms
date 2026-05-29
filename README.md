@@ -212,6 +212,32 @@ recognise it as inter-agent comms:
 «agent-msg» from=claude 14:23Z | build the parser
 ```
 
+## Delivery confirmation
+
+`send` verifies delivery by default. After injecting, it captures the bottom of
+the target pane and checks whether the message submitted or is still sitting in
+the composer (the classic `send-keys` failure: on a slow/loaded TUI the `Enter`
+batches into the paste as a newline and the message never sends). You get an
+explicit status instead of a silent drop:
+
+```
+delivered: claude -> codex (sess-codex)
+UNSUBMITTED: claude -> codex (sess-codex) — text sits in composer; raise this agent's enter_delay
+```
+
+`send` exits non-zero on `UNSUBMITTED`, so a calling agent/script knows the
+hand-off didn't land. Use `--no-confirm` to skip the check (fire-and-forget,
+slightly faster); add `--confirm` to `post`/`broadcast` to verify each doorbell.
+
+**What this is and isn't.** This is a `capture-pane` *submit* check — it confirms
+the keystrokes landed and cleared the composer, **not** that the agent read or
+understood the message (that's agent behaviour, not something any injector can
+guarantee). It's a heuristic, not an IPC acknowledgement: if your TUI echoes the
+submitted line low in the pane, widen the window with `AGENT_COMMS_VERIFY_LINES`.
+If you need socket-level delivery ACKs, queue-on-restart, and per-agent activity
+state, you want a heavier orchestrator (e.g. a daemon/TUI like initech or Coral) —
+this stays a zero-dependency layer over the tmux sessions you already run.
+
 ## Discreet by design
 
 - **Quiet**: minimal stdout; `-q` for silence.
@@ -233,6 +259,8 @@ recognise it as inter-agent comms:
 | `AGENT_COMMS_TMUX` | `tmux` on PATH | tmux binary |
 | `AGENT_COMMS_MARKER` | `«agent-msg»` | message prefix marker |
 | `AGENT_COMMS_ENTER_DELAY` | `0.4` | seconds between paste and Enter (see Trust/limitations) |
+| `AGENT_COMMS_VERIFY_LINES` | `3` | bottom pane rows scanned for the delivery check |
+| `AGENT_COMMS_VERIFY_DELAY` | `0.3` | seconds to wait after Enter before the delivery check |
 | `AGENT_COMMS_MAX_MSG_LEN` | `4000` | max chars per injected message |
 | `AGENT_COMMS_LOCK_TIMEOUT` | `5` | thread-append lock wait (seconds) |
 | `AGENT_COMMS_REVIVE_TIMEOUT` / `_GRACE` | `30` / `6` | revive cmd timeout / post-revive wait |
@@ -292,12 +320,17 @@ etiquette won't loop; the backstop nudges the rest.
   slow/loaded machine or an unusual TUI the gap can be too short and the message
   won't submit (it sits in the composer). Fix: raise that agent's `enter_delay`.
   We deliberately **don't auto-retry** a non-submit — re-sending risks a
-  double-submit. (Roadmap: optional submit verification.)
+  double-submit. Instead `send` *detects* a non-submit (see Delivery confirmation)
+  and reports `UNSUBMITTED` so you can raise that agent's `enter_delay`.
 - **Some CLIs sandbox their shell env** (e.g. Codex strips `$TMUX`), so they
   can't auto-detect their own session — pass `register --session <name>`. They
   can still send + receive normally.
-- **No delivery receipt** — a doorbell is fire-and-forget; the thread file is the
-  durable record. (Roadmap.)
+- **Delivery confirmation is a heuristic, not an ACK.** `send` verifies the
+  message *submitted* (via `capture-pane`), but can't prove the agent read it,
+  and a TUI that echoes the submitted line within the bottom `VERIFY_LINES` rows
+  can read as unsubmitted (widen the window). The thread file remains the durable
+  record regardless. For socket-level ACKs + queue-on-restart, use a daemon-based
+  orchestrator.
 
 ## When to use `send` vs `post` vs a project
 

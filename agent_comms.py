@@ -72,6 +72,13 @@ MARKER = os.environ.get("AGENT_COMMS_MARKER", "«agent-msg»")
 # absorbed as a newline and the message never submits. Per-agent override via the
 # registry/roster `enter_delay` field; this is the global default.
 ENTER_DELAY = float(os.environ.get("AGENT_COMMS_ENTER_DELAY", "0.4"))
+# Delivery confirmation: after injecting, capture the bottom N lines of the target
+# pane and check whether the marker is still sitting there (= unsubmitted, stuck in
+# the composer) vs gone (= submitted). A submit heuristic, NOT an IPC ack — it
+# verifies the keystrokes landed + submitted, not that the agent read the message.
+VERIFY_LINES = int(os.environ.get("AGENT_COMMS_VERIFY_LINES", "3"))
+# Seconds to wait after Enter before capturing for verification (lets the TUI redraw).
+VERIFY_DELAY = float(os.environ.get("AGENT_COMMS_VERIFY_DELAY", "0.3"))
 # Max chars per injected message — guards against a buggy/abusive agent spamming
 # a giant paste into another agent's pane. Longer messages are truncated.
 MAX_MESSAGE_LEN = int(os.environ.get("AGENT_COMMS_MAX_MSG_LEN", "4000"))
@@ -286,6 +293,40 @@ def inject(session: str, text: str, enter_delay: float | None = None) -> bool:
         return False
 
 
+def capture_pane_tail(session: str, lines: int = VERIFY_LINES) -> str | None:
+    """Return the last `lines` non-empty rows of the target pane's visible
+    content, or None if capture fails (no tmux / bad session)."""
+    try:
+        out = subprocess.run(
+            [tmux_bin(), "capture-pane", "-t", session, "-p"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+    except Exception:
+        return None
+    rows = [r for r in out.splitlines() if r.strip()]
+    return "\n".join(rows[-lines:])
+
+
+def verify_submitted(session: str, marker: str = MARKER) -> bool | None:
+    """Heuristic delivery check. A SUBMITTED message clears the composer, so the
+    marker is no longer pinned to the bottom input lines; an UNSUBMITTED message
+    sits literally in the composer at the bottom of the pane. Returns:
+      True  -> submitted (marker gone from the bottom rows)
+      False -> still in composer (marker present at the bottom)
+      None  -> couldn't capture (treat as unverified, not a hard failure).
+    This verifies *submission*, not that the agent read/understood the message —
+    a capture-pane heuristic, not an IPC acknowledgement. Widen/narrow the window
+    with AGENT_COMMS_VERIFY_LINES if your TUI echoes the submitted line low."""
+    time.sleep(VERIFY_DELAY)
+    tail = capture_pane_tail(session)
+    if tail is None:
+        return None
+    return marker not in tail
+
+
 # ---------- identity ----------
 def detect_self(reg: dict, override: str | None) -> str:
     if override:
@@ -412,7 +453,14 @@ def all_member_names() -> list[str]:
     return sorted(names)
 
 
-def deliver(reg: dict, sender: str, target: str, message: str, quiet: bool) -> bool:
+def deliver(
+    reg: dict,
+    sender: str,
+    target: str,
+    message: str,
+    quiet: bool,
+    confirm: bool = False,
+) -> bool:
     # 1) global registry; 2) fall back to project-roster members (self-reg flow).
     sess, reason = ensure_target(reg, target)
     delay = agents(reg).get(target, {}).get("enter_delay")
@@ -431,9 +479,25 @@ def deliver(reg: dict, sender: str, target: str, message: str, quiet: bool) -> b
         audit(sender, target, reason, message)
         return False
     ok = inject(sess, tagged(sender, message), enter_delay=delay)
-    audit(sender, target, "DELIVERED" if ok else "INJECT_FAIL", message)
+    status = "DELIVERED" if ok else "INJECT_FAIL"
+    note = ""
+    if ok and confirm:
+        sub = verify_submitted(sess)
+        if sub is False:
+            ok, status = False, "UNSUBMITTED"
+            note = " — text sits in composer; raise this agent's enter_delay"
+        elif sub is None:
+            status = "DELIVERED_UNVERIFIED"
+            note = " (could not capture pane to confirm)"
+    audit(sender, target, status, message)
     if not quiet:
-        print(f"{'sent' if ok else 'FAILED'}: {sender} -> {target} ({sess})")
+        verb = {
+            "DELIVERED": "delivered",
+            "DELIVERED_UNVERIFIED": "sent (unverified)",
+            "UNSUBMITTED": "UNSUBMITTED",
+            "INJECT_FAIL": "FAILED",
+        }[status]
+        print(f"{verb}: {sender} -> {target} ({sess}){note}")
     return ok
 
 
@@ -573,13 +637,21 @@ def cmd_post(args, reg):
                 " messages rapidly — do NOT reply unless it's essential]"
             )
         if sess and session_exists(sess) and inject(sess, pointer, enter_delay=delay):
-            rung += 1
-            audit(sender, label, f"DOORBELL:{args.thread}", msg)
+            if getattr(args, "confirm", False) and verify_submitted(sess) is False:
+                audit(sender, label, f"DOORBELL_UNSUBMITTED:{args.thread}", msg)
+                if not args.quiet:
+                    sys.stderr.write(
+                        f"  unsubmitted doorbell -> {label} ({sess}); raise its enter_delay\n"
+                    )
+            else:
+                rung += 1
+                audit(sender, label, f"DOORBELL:{args.thread}", msg)
         else:
             audit(sender, label, f"DOORBELL_FAIL:{args.thread}", msg)
     if not args.quiet:
         scope = "project" if members else "registry"
-        print(f"posted to {p}  | doorbell {rung}/{len(targets)} ({scope})")
+        verified = " (confirmed)" if getattr(args, "confirm", False) else ""
+        print(f"posted to {p}  | doorbell {rung}/{len(targets)} ({scope}){verified}")
     sys.exit(0 if (rung or not targets) else 1)
 
 
@@ -618,7 +690,7 @@ def cmd_threads(args, _reg):
 def cmd_send(args, reg):
     sender = detect_self(reg, args.frm)
     msg = " ".join(args.message)
-    ok = deliver(reg, sender, args.to, msg, args.quiet)
+    ok = deliver(reg, sender, args.to, msg, args.quiet, confirm=args.confirm)
     sys.exit(0 if ok else 1)
 
 
@@ -630,7 +702,7 @@ def cmd_broadcast(args, reg):
     ]
     fails = 0
     for t in targets:
-        if not deliver(reg, sender, t, msg, args.quiet):
+        if not deliver(reg, sender, t, msg, args.quiet, confirm=args.confirm):
             fails += 1
     if not args.quiet:
         print(
@@ -895,12 +967,23 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("message", nargs="+")
     s.add_argument("--from", dest="frm", default=None)
     s.add_argument("-q", "--quiet", action="store_true")
-    s.set_defaults(fn=cmd_send)
+    s.add_argument(
+        "--no-confirm",
+        dest="confirm",
+        action="store_false",
+        help="skip the capture-pane delivery check (faster, fire-and-forget)",
+    )
+    s.set_defaults(fn=cmd_send, confirm=True)
 
     b = sub.add_parser("broadcast", help="send to all enabled agents (except self)")
     b.add_argument("message", nargs="+")
     b.add_argument("--from", dest="frm", default=None)
     b.add_argument("-q", "--quiet", action="store_true")
+    b.add_argument(
+        "--confirm",
+        action="store_true",
+        help="verify each delivery via capture-pane (slower; one capture per target)",
+    )
     b.set_defaults(fn=cmd_broadcast)
 
     po = sub.add_parser("post", help="append to a thread .md + ring the doorbell")
@@ -911,6 +994,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     po.add_argument("--from", dest="frm", default=None)
     po.add_argument("-q", "--quiet", action="store_true")
+    po.add_argument(
+        "--confirm",
+        action="store_true",
+        help="verify each doorbell submitted via capture-pane (one capture per target)",
+    )
     po.set_defaults(fn=cmd_post)
 
     rd = sub.add_parser("read", help="print a thread .md")

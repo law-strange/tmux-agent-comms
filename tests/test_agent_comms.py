@@ -344,3 +344,51 @@ def test_no_reply_hint_in_doorbell(monkeypatch):
     except SystemExit:
         pass
     assert any("no reply needed" in t for t in captured)
+
+
+# ---------- delivery confirmation (capture-pane submit verification) ----------
+def test_verify_submitted_true_when_marker_absent(monkeypatch):
+    """Marker gone from the bottom rows => submitted."""
+    monkeypatch.setattr(ac, "VERIFY_DELAY", 0.0)
+    monkeypatch.setattr(
+        ac, "capture_pane_tail", lambda s, lines=ac.VERIFY_LINES: "esc to interrupt"
+    )
+    assert ac.verify_submitted("sess") is True
+
+
+def test_verify_submitted_false_when_marker_present(monkeypatch):
+    """Marker still sitting in the composer => unsubmitted."""
+    monkeypatch.setattr(ac, "VERIFY_DELAY", 0.0)
+    monkeypatch.setattr(
+        ac,
+        "capture_pane_tail",
+        lambda s, lines=ac.VERIFY_LINES: f"{ac.MARKER} from=claude 14:00Z | hi",
+    )
+    assert ac.verify_submitted("sess") is False
+
+
+def test_verify_submitted_none_when_capture_fails(monkeypatch):
+    """No tmux / bad session => None (unverified, not a hard fail)."""
+    monkeypatch.setattr(ac, "VERIFY_DELAY", 0.0)
+    monkeypatch.setattr(ac, "capture_pane_tail", lambda s, lines=ac.VERIFY_LINES: None)
+    assert ac.verify_submitted("sess") is None
+
+
+def test_deliver_confirm_unsubmitted_returns_false(monkeypatch):
+    """inject lands the keys but the message stays in the composer -> deliver
+    must report failure (the whole point of B: no more silent drops)."""
+    monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(ac, "inject", lambda s, t, enter_delay=None: True)
+    monkeypatch.setattr(ac, "verify_submitted", lambda s, marker=ac.MARKER: False)
+    reg = {"agents": {"codex": {"session": "csess", "enabled": True}}}
+    ok = ac.deliver(reg, "claude", "codex", "build it", quiet=True, confirm=True)
+    assert ok is False
+
+
+def test_deliver_confirm_delivered_returns_true(monkeypatch):
+    monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(ac, "inject", lambda s, t, enter_delay=None: True)
+    monkeypatch.setattr(ac, "verify_submitted", lambda s, marker=ac.MARKER: True)
+    reg = {"agents": {"codex": {"session": "csess", "enabled": True}}}
+    ok = ac.deliver(reg, "claude", "codex", "build it", quiet=True, confirm=True)
+    assert ok is True
