@@ -596,7 +596,21 @@ def cmd_post(args, reg):
         if args.to in members:
             m = members[args.to]
             targets = [(args.to, m["session"], m.get("enter_delay"))]
+        elif members:
+            # PROJECT post + recipient is NOT a project member.
+            # v0.3.0: do NOT silently fall back to the global registry. That
+            # cross-project leak routed messages to the wrong same-named agent
+            # (e.g. a marketing 'codex' post hitting the PMXT Codex builder).
+            # A project post stays inside the project; to reach a fleet/other-
+            # project agent, use `agent_comms send <name>` explicitly.
+            sys.stderr.write(
+                f"'{args.to}' is not a member of project '{args.thread}' "
+                f"(members: {', '.join(members) or '(none)'}).\n"
+                f'For a fleet/other-project agent use:  agent_comms send {args.to} "..."\n'
+            )
+            sys.exit(1)
         elif args.to in agents(reg):
+            # No project roster for this thread -> registry-addressed post (back-compat).
             sess, reason = ensure_target(reg, args.to)
             if sess is None:  # disabled or session down — do NOT inject
                 sys.stderr.write(f"{reason.lower().replace('_', ' ')}: {args.to}\n")
@@ -837,6 +851,21 @@ def cmd_register(args, _reg):
             "Find it with: tmux list-sessions\n"
         )
         sys.exit(2)
+    # v0.3.0 guard: refuse to claim a tmux session that already belongs to a
+    # DIFFERENT fleet agent in the global registry. That collision is how a
+    # sandboxed CLI mis-detected its session and hijacked another agent (a
+    # marketing GPT registering session 'codex' = the PMXT builder, so marketing
+    # messages landed in PMXT). Pass --force to override if you really mean it.
+    for gname, gmeta in agents(load_registry()).items():
+        if gmeta.get("session") == sess and gname != (args.as_name or sess):
+            if not getattr(args, "force", False):
+                sys.stderr.write(
+                    f"refusing: tmux session '{sess}' already belongs to fleet agent "
+                    f"'{gname}'. You are likely in a different session.\n"
+                    f"Check `tmux list-sessions`, re-run with the correct --session, "
+                    f"or pass --force to override.\n"
+                )
+                sys.exit(2)
     project = args.project
     roster = load_roster(project)
     members = roster.setdefault("members", {})
@@ -1033,6 +1062,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="seconds between paste and Enter for YOUR pane (raise if your TUI doesn't submit, e.g. 0.8)",
+    )
+    rg.add_argument(
+        "--force",
+        action="store_true",
+        help="override the guard that refuses a session already owned by another fleet agent",
     )
     rg.set_defaults(fn=cmd_register)
 

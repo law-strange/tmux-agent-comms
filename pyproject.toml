@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tmux-agent-comms"
-version = "0.2.0"
+version = "0.3.0"
 description = "A discreet, zero-dependency message bus that lets terminal AI agents (Claude Code, Codex, Grok, Aider...) talk to each other over tmux — via readable markdown threads + a doorbell."
 readme = "README.md"
 license = { file = "LICENSE" }

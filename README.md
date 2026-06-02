@@ -352,3 +352,19 @@ etiquette won't loop; the backstop nudges the rest.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## v0.3.0 — project-scoped routing (collision safety)
+
+Two projects can safely reuse a role-name (e.g. each has a `codex`) without messages
+crossing wires:
+
+- **`post <project> --to <name>` is strictly project-scoped.** If `<name>` isn't a
+  member of that project, it errors — it does **not** fall back to the global
+  registry. To message a fleet/other-project agent, use `send <name>` (explicitly
+  cross-project).
+- **`register` refuses to claim a tmux session already owned by a different
+  fleet agent** (a sandboxed CLI mis-detecting its session is how messages get
+  hijacked). Pass `--force` to override.
+
+Convention: keep global names unique — project-tag any non-primary agent
+(`cl-codex`, `cl-claude`, …) rather than reusing bare `codex`/`claude`.

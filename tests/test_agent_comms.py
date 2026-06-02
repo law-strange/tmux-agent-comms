@@ -392,3 +392,68 @@ def test_deliver_confirm_delivered_returns_true(monkeypatch):
     reg = {"agents": {"codex": {"session": "csess", "enabled": True}}}
     ok = ac.deliver(reg, "claude", "codex", "build it", quiet=True, confirm=True)
     assert ok is True
+
+
+# ---------- v0.3.0: cross-project collision guards ----------
+def test_post_to_nonmember_does_not_leak_to_global_registry(monkeypatch):
+    """A project post with --to a NON-member must NOT fall back to the global
+    registry — that cross-project leak routed messages to the wrong same-named
+    agent (marketing 'codex' hitting the PMXT Codex builder)."""
+    injected = []
+    monkeypatch.setattr(ac, "current_session", lambda: "sess-mk")
+    monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(
+        ac, "inject", lambda s, t, enter_delay=None: injected.append((s, t)) or True
+    )
+    ac.save_roster(
+        {
+            "project": "mkproj",
+            "members": {"mk-lead": {"session": "sess-mk", "model": "m", "role": ""}},
+        }
+    )
+    reg = {"agents": {"codex": {"session": "pmxt-codex-sess", "enabled": True}}}
+
+    class P:
+        thread, message, to, frm, quiet = "mkproj", ["hi"], "codex", None, True
+
+    code = None
+    try:
+        ac.cmd_post(P(), reg)
+    except SystemExit as e:
+        code = e.code
+    assert code == 1
+    # crucially: nothing was injected into the global PMXT codex session
+    assert not any(s == "pmxt-codex-sess" for s, _ in injected)
+
+
+def test_register_refuses_session_owned_by_fleet_agent(monkeypatch):
+    """Refuse registering a tmux session that already belongs to a DIFFERENT fleet
+    agent in the global registry (marketing GPT claiming session 'codex')."""
+    monkeypatch.setattr(ac, "current_session", lambda: None)
+    monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(ac, "inject", lambda *a, **k: True)
+    ac.save_registry({"agents": {"codex": {"session": "codex", "enabled": True}}})
+
+    class R:
+        project, as_name, session, model, role, enter_delay, force = (
+            "mkg", "gpt", "codex", "gpt-5.5", "builds", None, False,
+        )
+
+    code = None
+    try:
+        ac.cmd_register(R(), {"agents": {}})
+    except SystemExit as e:
+        code = e.code
+    assert code == 2
+    assert "gpt" not in ac.load_roster("mkg").get("members", {})
+
+    class RF:
+        project, as_name, session, model, role, enter_delay, force = (
+            "mkg", "gpt", "codex", "gpt-5.5", "builds", None, True,
+        )
+
+    try:
+        ac.cmd_register(RF(), {"agents": {}})
+    except SystemExit:
+        pass
+    assert "gpt" in ac.load_roster("mkg").get("members", {})
