@@ -157,6 +157,7 @@ def test_register_post_integration(monkeypatch):
     injected = []
     monkeypatch.setattr(ac, "current_session", lambda: "sess-claude")
     monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(ac, "tmux_server_reachable", lambda: True)
     monkeypatch.setattr(
         ac, "inject", lambda s, t, enter_delay=None: injected.append((s, t)) or True
     )
@@ -223,6 +224,7 @@ def test_per_agent_enter_delay_flows_to_doorbell(monkeypatch):
     calls = []
     monkeypatch.setattr(ac, "current_session", lambda: "sess-sender")
     monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(ac, "tmux_server_reachable", lambda: True)
     monkeypatch.setattr(
         ac,
         "inject",
@@ -267,6 +269,7 @@ def test_loop_warning_appended_to_doorbell(monkeypatch):
     captured = []
     monkeypatch.setattr(ac, "current_session", lambda: "sess-c")
     monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(ac, "tmux_server_reachable", lambda: True)
     monkeypatch.setattr(
         ac, "inject", lambda s, t, enter_delay=None: captured.append(t) or True
     )
@@ -299,6 +302,7 @@ def test_send_resolves_project_member(monkeypatch):
     `send grok` -> 'unknown: grok' because grok was a roster member)."""
     captured = []
     monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(ac, "tmux_server_reachable", lambda: True)
     monkeypatch.setattr(
         ac, "inject", lambda s, t, enter_delay=None: captured.append((s, t)) or True
     )
@@ -318,6 +322,7 @@ def test_no_reply_hint_in_doorbell(monkeypatch):
     captured = []
     monkeypatch.setattr(ac, "current_session", lambda: "sess-x")
     monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(ac, "tmux_server_reachable", lambda: True)
     monkeypatch.setattr(
         ac, "inject", lambda s, t, enter_delay=None: captured.append(t) or True
     )
@@ -379,6 +384,7 @@ def test_deliver_confirm_unsubmitted_returns_false(monkeypatch):
     """inject lands the keys but the message stays in the composer -> deliver
     must report failure (the whole point of B: no more silent drops)."""
     monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(ac, "tmux_server_reachable", lambda: True)
     monkeypatch.setattr(ac, "inject", lambda s, t, enter_delay=None: True)
     monkeypatch.setattr(ac, "verify_submitted", lambda s, marker=ac.MARKER: False)
     reg = {"agents": {"codex": {"session": "csess", "enabled": True}}}
@@ -388,6 +394,7 @@ def test_deliver_confirm_unsubmitted_returns_false(monkeypatch):
 
 def test_deliver_confirm_delivered_returns_true(monkeypatch):
     monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(ac, "tmux_server_reachable", lambda: True)
     monkeypatch.setattr(ac, "inject", lambda s, t, enter_delay=None: True)
     monkeypatch.setattr(ac, "verify_submitted", lambda s, marker=ac.MARKER: True)
     reg = {"agents": {"codex": {"session": "csess", "enabled": True}}}
@@ -403,6 +410,7 @@ def test_post_to_nonmember_does_not_leak_to_global_registry(monkeypatch):
     injected = []
     monkeypatch.setattr(ac, "current_session", lambda: "sess-mk")
     monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(ac, "tmux_server_reachable", lambda: True)
     monkeypatch.setattr(
         ac, "inject", lambda s, t, enter_delay=None: injected.append((s, t)) or True
     )
@@ -432,6 +440,7 @@ def test_register_refuses_session_owned_by_fleet_agent(monkeypatch):
     agent in the global registry (marketing GPT claiming session 'codex')."""
     monkeypatch.setattr(ac, "current_session", lambda: None)
     monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(ac, "tmux_server_reachable", lambda: True)
     monkeypatch.setattr(ac, "inject", lambda *a, **k: True)
     ac.save_registry({"agents": {"codex": {"session": "codex", "enabled": True}}})
 
@@ -498,7 +507,9 @@ def test_sandboxed_post_spools_instead_of_false_down(monkeypatch):
     monkeypatch.setattr(ac, "tmux_server_reachable", lambda: False)  # sandboxed sender
     # if anything tried to inject, fail the test loudly
     monkeypatch.setattr(
-        ac, "inject", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not inject"))
+        ac,
+        "inject",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not inject")),
     )
     ac.save_roster(
         {
@@ -511,7 +522,13 @@ def test_sandboxed_post_spools_instead_of_false_down(monkeypatch):
     )
 
     class P:
-        thread, message, to, frm, quiet = "spoolproj", ["review please"], None, None, True
+        thread, message, to, frm, quiet = (
+            "spoolproj",
+            ["review please"],
+            None,
+            None,
+            True,
+        )
 
     code = None
     try:
@@ -524,7 +541,9 @@ def test_sandboxed_post_spools_instead_of_false_down(monkeypatch):
     import json as _j
 
     rec = _j.loads(open([f for f in spooled if "claude-cl" in f][0]).read())
-    assert rec["session"] == "7" and "review please" not in rec["text"][:0]  # text present
+    assert (
+        rec["session"] == "7" and "review please" not in rec["text"][:0]
+    )  # text present
     log = open(os.environ["AGENT_COMMS_LOG"]).read()
     assert "DOORBELL_SPOOLED" in log and "DOORBELL_FAIL:spoolproj" not in log
 
@@ -539,6 +558,7 @@ def test_relay_drains_spool_and_injects(monkeypatch):
     assert glob.glob(os.path.join(ac.SPOOL_DIR, "*.json"))
     injected = []
     monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(ac, "tmux_server_reachable", lambda: True)
     monkeypatch.setattr(
         ac, "inject", lambda s, t, enter_delay=None: injected.append((s, t)) or True
     )
