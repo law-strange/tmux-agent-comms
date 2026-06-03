@@ -64,6 +64,9 @@ PROJECTS_DIR = Path(
 JOIN_DOC = Path(
     os.environ.get("AGENT_COMMS_JOIN_DOC", str(CONFIG_DIR / "coms_join.md"))
 )
+# Spool for doorbells a SANDBOXED sender couldn't inject (it can't reach the tmux
+# server). A non-sandboxed `agent_comms relay` watcher drains this and injects.
+SPOOL_DIR = Path(os.environ.get("AGENT_COMMS_SPOOL", str(CONFIG_DIR / "spool")))
 MARKER = os.environ.get("AGENT_COMMS_MARKER", "«agent-msg»")
 
 # ---------- tunable constants (env-overridable) ----------
@@ -255,6 +258,59 @@ def current_session() -> str | None:
         return s or None
     except Exception:
         return None
+
+
+def tmux_server_reachable() -> bool:
+    """True if THIS process can reach the tmux server at all (distinct from a
+    specific session being absent). A SANDBOXED sender (e.g. Codex/GPT CLI strips
+    $TMUX and cannot reach the tmux socket) returns False — so a failed
+    has-session probe from such a sender must NOT be read as 'recipient down'.
+    Spool for a non-sandboxed relay instead."""
+    if os.environ.get("TMUX"):
+        return True
+    try:
+        return (
+            subprocess.run(
+                [tmux_bin(), "list-sessions"], capture_output=True, timeout=5
+            ).returncode
+            == 0
+        )
+    except Exception:
+        return False
+
+
+def spool_doorbell(
+    target_name: str,
+    session: str,
+    text: str,
+    enter_delay: float | None,
+    sender: str,
+    kind: str,
+) -> bool:
+    """Persist an injection a sandboxed sender couldn't deliver, for `agent_comms
+    relay` (run from a non-sandboxed env with the tmux server) to inject later.
+    For a project post the thread .md already has the content; this recovers only
+    the live ping. For a direct send this IS the delivery path."""
+    try:
+        import hashlib
+
+        SPOOL_DIR.mkdir(parents=True, exist_ok=True)
+        ts = now_utc()
+        rec = {
+            "ts": ts,
+            "sender": sender,
+            "target": target_name,
+            "session": session,
+            "text": text,
+            "enter_delay": enter_delay,
+            "kind": kind,
+        }
+        h = hashlib.sha1((ts + target_name + text).encode()).hexdigest()[:8]
+        stamp = ts.replace(":", "").replace("-", "")
+        (SPOOL_DIR / f"{stamp}-{target_name}-{h}.json").write_text(json.dumps(rec))
+        return True
+    except Exception:
+        return False
 
 
 def inject(session: str, text: str, enter_delay: float | None = None) -> bool:
@@ -471,6 +527,23 @@ def deliver(
             sess, reason = (
                 (msess, "OK") if session_exists(msess) else (None, "SESSION_DOWN")
             )
+    # SANDBOX case: a sender that can't reach the tmux server gets a FALSE
+    # SESSION_DOWN from the has-session probe (the recipient may be fine).
+    # Don't mislabel 'down' — spool for the non-sandboxed relay to inject.
+    if sess is None and reason == "SESSION_DOWN" and not tmux_server_reachable():
+        tsess = agents(reg).get(target, {}).get("session")
+        if not tsess:
+            tsess, _d2, _p2 = find_member_session(target)
+        if tsess and spool_doorbell(
+            target, tsess, tagged(sender, message), delay, sender, "send"
+        ):
+            audit(sender, target, "UNDELIVERABLE_SANDBOX_SPOOLED", message)
+            if not quiet:
+                print(
+                    f"spooled: {sender} -> {target} (this sender can't reach tmux; "
+                    f"relay will deliver) — NOT down"
+                )
+            return True
     if sess is None:
         pool = list(agents(reg)) + all_member_names()
         sys.stderr.write(
@@ -642,6 +715,11 @@ def cmd_post(args, reg):
         ]
 
     rung = 0
+    spooled = 0
+    # If THIS sender can't reach the tmux server (sandboxed CLI), the has-session
+    # probe + inject will all fail — but that does NOT mean recipients are down.
+    # Spool each doorbell for the non-sandboxed relay; the thread post already landed.
+    reachable = tmux_server_reachable()
     for label, sess, delay in targets:
         pointer = base_pointer
         # Non-blocking loop guard: warn if sender<->label are ping-ponging.
@@ -650,6 +728,13 @@ def cmd_post(args, reg):
                 f" [⚠ loop guard: {sender}<->{label} have exchanged several"
                 " messages rapidly — do NOT reply unless it's essential]"
             )
+        if not reachable:
+            if sess and spool_doorbell(label, sess, pointer, delay, sender, "doorbell"):
+                spooled += 1
+                audit(sender, label, f"DOORBELL_SPOOLED:{args.thread}", msg)
+            else:
+                audit(sender, label, f"DOORBELL_FAIL:{args.thread}", msg)
+            continue
         if sess and session_exists(sess) and inject(sess, pointer, enter_delay=delay):
             if getattr(args, "confirm", False) and verify_submitted(sess) is False:
                 audit(sender, label, f"DOORBELL_UNSUBMITTED:{args.thread}", msg)
@@ -665,8 +750,12 @@ def cmd_post(args, reg):
     if not args.quiet:
         scope = "project" if members else "registry"
         verified = " (confirmed)" if getattr(args, "confirm", False) else ""
-        print(f"posted to {p}  | doorbell {rung}/{len(targets)} ({scope}){verified}")
-    sys.exit(0 if (rung or not targets) else 1)
+        extra = f" + {spooled} spooled (sandbox→relay)" if spooled else ""
+        print(
+            f"posted to {p}  | doorbell {rung}/{len(targets)} ({scope}){verified}{extra}"
+        )
+    # success if we rang or spooled anyone (or there were no targets)
+    sys.exit(0 if (rung or spooled or not targets) else 1)
 
 
 def cmd_read(args, _reg):
@@ -706,6 +795,61 @@ def cmd_send(args, reg):
     msg = " ".join(args.message)
     ok = deliver(reg, sender, args.to, msg, args.quiet, confirm=args.confirm)
     sys.exit(0 if ok else 1)
+
+
+def cmd_relay(args, _reg):
+    """Drain the doorbell spool: inject each spooled item into its target session.
+    MUST run from a NON-sandboxed env that can reach the tmux server (e.g. a
+    launchd watcher on the host). Sandboxed senders (Codex/GPT) spool here because
+    they cannot inject; this is the delivery half. Stale pings are expired."""
+    if not SPOOL_DIR.is_dir():
+        if not args.quiet:
+            print("relay: spool empty")
+        return
+    max_age = float(os.environ.get("AGENT_COMMS_RELAY_MAX_AGE", "3600"))
+    now = time.time()
+    delivered = pending = expired = 0
+    for f in sorted(SPOOL_DIR.glob("*.json")):
+        try:
+            rec = json.loads(f.read_text())
+        except Exception:
+            f.unlink(missing_ok=True)
+            continue
+        try:
+            age = (
+                now
+                - datetime.fromisoformat(rec["ts"].replace("Z", "+00:00")).timestamp()
+            )
+        except Exception:
+            age = 0
+        if age > max_age:
+            audit(
+                rec.get("sender", "?"),
+                rec.get("target", "?"),
+                "RELAY_EXPIRED",
+                rec.get("text", ""),
+            )
+            f.unlink(missing_ok=True)
+            expired += 1
+            continue
+        sess = rec.get("session")
+        if (
+            sess
+            and session_exists(sess)
+            and inject(sess, rec.get("text", ""), enter_delay=rec.get("enter_delay"))
+        ):
+            audit(
+                rec.get("sender", "?"),
+                rec.get("target", "?"),
+                "RELAY_DELIVERED",
+                rec.get("text", ""),
+            )
+            f.unlink(missing_ok=True)
+            delivered += 1
+        else:
+            pending += 1  # recipient down / not yet up — leave for next run
+    if not args.quiet:
+        print(f"relay: delivered={delivered} pending={pending} expired={expired}")
 
 
 def cmd_broadcast(args, reg):
@@ -1037,6 +1181,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     th = sub.add_parser("threads", help="list discussion threads")
     th.set_defaults(fn=cmd_threads)
+
+    rl = sub.add_parser(
+        "relay",
+        help="drain the doorbell spool (run from a non-sandboxed host w/ the tmux server)",
+    )
+    rl.add_argument("--quiet", action="store_true")
+    rl.set_defaults(fn=cmd_relay)
 
     # --- self-registration / projects ---
     rg = sub.add_parser(

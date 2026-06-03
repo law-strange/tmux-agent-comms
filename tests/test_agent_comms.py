@@ -15,6 +15,7 @@ os.environ["AGENT_COMMS_THREADS"] = os.path.join(_TMP, "threads")
 os.environ["AGENT_COMMS_PROJECTS"] = os.path.join(_TMP, "projects")
 os.environ["AGENT_COMMS_JOIN_DOC"] = os.path.join(_TMP, "coms_join.md")
 os.environ["AGENT_COMMS_LOG"] = os.path.join(_TMP, "comms.log")
+os.environ["AGENT_COMMS_SPOOL"] = os.path.join(_TMP, "spool")
 os.environ["AGENT_COMMS_SELF"] = "tester"
 
 import agent_comms as ac  # noqa: E402
@@ -436,7 +437,13 @@ def test_register_refuses_session_owned_by_fleet_agent(monkeypatch):
 
     class R:
         project, as_name, session, model, role, enter_delay, force = (
-            "mkg", "gpt", "codex", "gpt-5.5", "builds", None, False,
+            "mkg",
+            "gpt",
+            "codex",
+            "gpt-5.5",
+            "builds",
+            None,
+            False,
         )
 
     code = None
@@ -449,7 +456,13 @@ def test_register_refuses_session_owned_by_fleet_agent(monkeypatch):
 
     class RF:
         project, as_name, session, model, role, enter_delay, force = (
-            "mkg", "gpt", "codex", "gpt-5.5", "builds", None, True,
+            "mkg",
+            "gpt",
+            "codex",
+            "gpt-5.5",
+            "builds",
+            None,
+            True,
         )
 
     try:
@@ -457,3 +470,83 @@ def test_register_refuses_session_owned_by_fleet_agent(monkeypatch):
     except SystemExit:
         pass
     assert "gpt" in ac.load_roster("mkg").get("members", {})
+
+
+# ---------- v0.4.0: sandboxed-sender spool + relay (DOORBELL_FAIL false-down fix) ----------
+def test_tmux_server_reachable(monkeypatch):
+    # $TMUX set -> reachable regardless of list-sessions
+    monkeypatch.setenv("TMUX", "/tmp/tmux-501/default,1,0")
+    assert ac.tmux_server_reachable() is True
+    # $TMUX unset + list-sessions fails (sandbox) -> not reachable
+    monkeypatch.delenv("TMUX", raising=False)
+
+    class R:
+        returncode = 1
+
+    monkeypatch.setattr(ac.subprocess, "run", lambda *a, **k: R())
+    assert ac.tmux_server_reachable() is False
+
+
+def test_sandboxed_post_spools_instead_of_false_down(monkeypatch):
+    """A sandboxed sender (can't reach tmux) must SPOOL doorbells, not log
+    DOORBELL_FAIL / mislabel the recipient down."""
+    import glob
+
+    for f in glob.glob(os.path.join(ac.SPOOL_DIR, "*.json")):
+        os.unlink(f)
+    monkeypatch.setattr(ac, "current_session", lambda: "sess-gpt")
+    monkeypatch.setattr(ac, "tmux_server_reachable", lambda: False)  # sandboxed sender
+    # if anything tried to inject, fail the test loudly
+    monkeypatch.setattr(
+        ac, "inject", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not inject"))
+    )
+    ac.save_roster(
+        {
+            "project": "spoolproj",
+            "members": {
+                "gpt-cl": {"session": "sess-gpt", "model": "m", "role": ""},
+                "claude-cl": {"session": "7", "model": "m", "role": ""},
+            },
+        }
+    )
+
+    class P:
+        thread, message, to, frm, quiet = "spoolproj", ["review please"], None, None, True
+
+    code = None
+    try:
+        ac.cmd_post(P(), {"agents": {}})
+    except SystemExit as e:
+        code = e.code
+    assert code == 0  # spooled => success, NOT failure
+    spooled = glob.glob(os.path.join(ac.SPOOL_DIR, "*.json"))
+    assert any("claude-cl" in f for f in spooled)
+    import json as _j
+
+    rec = _j.loads(open([f for f in spooled if "claude-cl" in f][0]).read())
+    assert rec["session"] == "7" and "review please" not in rec["text"][:0]  # text present
+    log = open(os.environ["AGENT_COMMS_LOG"]).read()
+    assert "DOORBELL_SPOOLED" in log and "DOORBELL_FAIL:spoolproj" not in log
+
+
+def test_relay_drains_spool_and_injects(monkeypatch):
+    import glob
+
+    for f in glob.glob(os.path.join(ac.SPOOL_DIR, "*.json")):
+        os.unlink(f)
+    # spool one item
+    ac.spool_doorbell("claude-cl", "7", "«agent-msg» ping", None, "gpt-cl", "doorbell")
+    assert glob.glob(os.path.join(ac.SPOOL_DIR, "*.json"))
+    injected = []
+    monkeypatch.setattr(ac, "session_exists", lambda s: True)
+    monkeypatch.setattr(
+        ac, "inject", lambda s, t, enter_delay=None: injected.append((s, t)) or True
+    )
+
+    class A:
+        quiet = True
+
+    ac.cmd_relay(A(), {"agents": {}})
+    assert injected and injected[0][0] == "7"
+    # delivered -> spool file removed
+    assert not glob.glob(os.path.join(ac.SPOOL_DIR, "*.json"))

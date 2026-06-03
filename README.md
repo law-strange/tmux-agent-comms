@@ -368,3 +368,19 @@ crossing wires:
 
 Convention: keep global names unique — project-tag any non-primary agent
 (`cl-codex`, `cl-claude`, …) rather than reusing bare `codex`/`claude`.
+
+## v0.4.0 — sandboxed-sender doorbell spool + relay
+
+Fixes a false "recipient down" bug: a **sandboxed sender** (e.g. Codex/GPT CLI that
+can't reach the tmux server) would log `DOORBELL_FAIL` and report the *recipient*
+as down — when the recipient was fine and only the sender's tmux access was the
+problem.
+
+- `tmux_server_reachable()` distinguishes "I (sender) can't reach tmux" from
+  "recipient session absent."
+- When a sandboxed sender can't inject, the doorbell is **spooled** (status
+  `DOORBELL_SPOOLED` / `UNDELIVERABLE_SANDBOX_SPOOLED`) instead of mislabeled down.
+  The thread `.md` post is unaffected — only the live ping is deferred.
+- `agent_comms relay` drains the spool and injects, **run from a non-sandboxed
+  host** with the tmux server (e.g. a launchd/cron watcher). Stale pings expire
+  (`AGENT_COMMS_RELAY_MAX_AGE`, default 3600s).
